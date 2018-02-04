@@ -1,30 +1,46 @@
 module Main where
 
--- TODO: order imports
-import Data.Maybe
-import qualified Data.ByteString.Lazy.Char8 as BL
+-- TODOS
+--    ordering of imports
+--    Hadoc comments for every function
+--    structure into multiple files if necessary
+--    implement in Idris (using Buffer for ByteString)
+
 import Data.Char
+import Data.Maybe
+-- using LAZY otherwise would load the whole file into memory
+-- profiling with stack:
+--    stack build --profile
+--    stack exec -- parse-quote +RTS -p
+--    hp2ps -e8in -c parse-quote.hp#
+--  LAZY:   memory footprint ~ 93 KByte
+--  STRICT: memory footprint ~  6 MByte
+import qualified Data.ByteString.Lazy.Char8 as BL
 
 fileName :: String
---fileName = "data/mdf-kospi200.20110216-0.pcap/data"
-fileName = "test.txrt"
+fileName = "data/mdf-kospi200.20110216-0.pcap/data"
 
+-- a Quote packet starts with this marker
 quotePacketMarker :: String
 quotePacketMarker = "B6034"
 
 main :: IO ()
 main = do
+  -- TODO: replace with total function: check if file can be opened and not just throw error at run-time
   bs <- BL.readFile fileName
-  
-  let f = searchStream "print" bs
-  if isJust f
-    then (do
-      putStrLn "found"
-      let bs' = fromJust f
-      printStream bs')
-    else putStrLn "Not found"
-
+  let n = countQuotePackets bs
+  putStrLn ("Found " ++ show n ++ " quote packets in stream")
   return ()
+
+countQuotePackets :: BL.ByteString -> Int
+countQuotePackets bs = countQuotePacketsAux bs 0
+  where
+    countQuotePacketsAux :: BL.ByteString -> Int -> Int
+    countQuotePacketsAux bs acc
+        | isJust res = countQuotePacketsAux (fromJust res) (acc + 1)
+        | otherwise = acc
+      where
+        res = searchStream quotePacketMarker bs
 
 printStream :: BL.ByteString -> IO ()
 printStream bs = do
@@ -36,21 +52,20 @@ printStream bs = do
       putStr [c]
       printStream bs'
 
-
 searchStream :: String -> BL.ByteString -> Maybe BL.ByteString
-searchStream str bs = do
-    (initWin, bs') <- initWindow (length str) [] bs
-    (_, bs') <- nextQuoteAux str initWin bs'
+searchStream tok bs = do
+    (initWin, bs') <- initWindow (length tok) [] bs
+    (_, bs') <- searchStreamAux tok initWin bs'
     return bs'
 
   where
-    nextQuoteAux :: String -> String -> BL.ByteString -> Maybe (String, BL.ByteString)
-    nextQuoteAux str win bs = 
-      if win == str
+    searchStreamAux :: String -> String -> BL.ByteString -> Maybe (String, BL.ByteString)
+    searchStreamAux tok win bs = 
+      if win == tok
         then Just (win, bs)
         else do
           (win', bs') <- slideWindow win bs
-          nextQuoteAux str win' bs'
+          searchStreamAux tok win' bs'
 
     initWindow  :: Int -> String -> BL.ByteString -> Maybe (String, BL.ByteString)
     initWindow 0 str bs = Just (str, bs)
