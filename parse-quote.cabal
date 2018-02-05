@@ -59,7 +59,9 @@ executable parse-quote
   -- Other library packages from which modules are imported.
   build-depends:       base >=4.9 && <4.10
                      , bytestring
-
+                     , binary
+                     , time
+                     
   -- Directories containing source files.
   hs-source-dirs:      src
   
@@ -70,5 +72,11 @@ executable parse-quote
     -O2
     -threaded
     -fprof-auto
-    "-with-rtsopts=-hc -p -K100M -i0.1"
+    "-with-rtsopts=-hy -p -K100M -i0.1"
     --"-with-rtsopts=-N -p -s -h -i0.1"
+    -Wall
+    -Werror
+    -fwarn-tabs
+    -fno-warn-name-shadowing
+
+    -- ghc-options:         -O3 -Wall -Werror -fwarn-tabs -fno-warn-name-shadowing
