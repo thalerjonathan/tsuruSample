@@ -11,14 +11,16 @@ import Data.Word
 import Data.Time.Format
 import Data.Time.Clock.POSIX
 
+import Control.Monad.State
+
 -- TODO: seems to consume more or less the whole file into memory
 -- using LAZY otherwise would load the whole file into memory
 -- profiling with stack:
 --    stack build --profile
 --    stack exec -- parse-quote +RTS -p
 --    hp2ps -e8in -c parse-quote.hp
+-- NOTE: we used the Data.Binary.Get package but it seemed that data was not read lazily
 import qualified Data.ByteString.Lazy.Char8 as BL
-import Data.Binary.Get
 
 import Debug.Trace
 
@@ -132,6 +134,8 @@ kosPcapSuperSizeFileName = "data/mdf-kospi200.20110216-0.pcap/dataBig"
 quotePacketMarker :: String
 quotePacketMarker = "B6034"
 
+-- TODO: when re-ordering, then can expect packages to arrive out-of-order up to 3 seconds
+
 main :: IO ()
 main = do
   let fileName = kosPcapSuperSizeFileName -- kosPcapfileName -- "src/Main.hs"
@@ -159,20 +163,13 @@ printQuotePacketsArrival headerSwapped bs = do
       printQuotePacketsArrival headerSwapped bs'
     else putStrLn "Failed reading next packet, proably EOS"
 
--- TODO: when re-ordering, then can expect packages to arrive out-of-order up to 3 seconds
-{-
-printQuotePacketsAcceptOrder :: Integer 
-                             -> BL.ByteString 
-                             -> IO ()
-printQuotePacketsAcceptOrder idx bs = do
-  let mayPack = parseNextQuotePacket idx bs
-  if isJust mayPack
-    then do
-      let (qp, bs') = fromJust mayPack
-      print qp
-      printQuotePacketsAcceptOrder (idx + 1) bs'
-    else putStrLn "Failed parsing next quote packet, proably EOS"
--}
+type LazyByteParsing a = State BL.ByteString a
+ 
+getLazyByteString :: Int64 -> LazyByteParsing BL.ByteString 
+getLazyByteString n = do
+  bs <- get
+  let bs' = BL.take n bs
+  return bs'
 
 nextQuotePacket :: Bool -> BL.ByteString -> Maybe (QuotePacket, BL.ByteString)
 nextQuotePacket headerSwapped bs = either 
@@ -180,7 +177,7 @@ nextQuotePacket headerSwapped bs = either
       (\(bs', _off, qp) -> Just (qp, bs'))
       (runGetOrFail searchQuotePacket bs)
   where
-    searchQuotePacket :: Get QuotePacket  
+    searchQuotePacket :: LazyByteParsing QuotePacket 
     searchQuotePacket = do
       ph <- readNextPacketHeader headerSwapped
 
@@ -202,7 +199,7 @@ nextQuotePacket headerSwapped bs = either
           let ts = formatTime defaultTimeLocale "%T" utcTime -- format to same as quote accept time: HHMMSSuu
           parseQuotePacket ts
 
-parseQuotePacket :: String -> Get QuotePacket
+parseQuotePacket :: String -> LazyByteParsing QuotePacket
 parseQuotePacket ts = do
     issueCode <- getLazyByteString 12
     issueSeqNo <- getLazyByteString 3
@@ -270,7 +267,7 @@ parseQuotePacket ts = do
     , qpAcceptTime  = BL.unpack acceptTime
     }
   where
-    parseOffering :: Get Offering
+    parseOffering :: LazyByteParsing Offering
     parseOffering = do
       price <- getLazyByteString 5
       quantity <- getLazyByteString 7
@@ -287,7 +284,7 @@ readPcapGlobalHeader bs = do
           else Nothing)
       ret
   where
-    readPcapGlobalHeaderAux :: Get (Maybe PcapGlobalHeader)
+    readPcapGlobalHeaderAux :: LazyByteParsing (Maybe PcapGlobalHeader)
     readPcapGlobalHeaderAux = do
       magicNumber <- getWord32be
 
@@ -303,7 +300,7 @@ readPcapGlobalHeader bs = do
             return $ Just gh
           else return Nothing
 
-    readPcapGlobalHeaderIdent :: Get PcapGlobalHeader
+    readPcapGlobalHeaderIdent :: LazyByteParsing PcapGlobalHeader
     readPcapGlobalHeaderIdent = do
       versionMajor <- getWord16be
       versionMinor <- getWord16be
@@ -323,7 +320,7 @@ readPcapGlobalHeader bs = do
       , pcapSwapped      = False
       }
 
-    readPcapGlobalHeaderSwapped :: Get PcapGlobalHeader
+    readPcapGlobalHeaderSwapped :: LazyByteParsing PcapGlobalHeader
     readPcapGlobalHeaderSwapped = do
       versionMajor <- getWord16le
       versionMinor <- getWord16le
@@ -343,7 +340,7 @@ readPcapGlobalHeader bs = do
       , pcapSwapped      = True
       }
 
-readNextPacketHeader :: Bool -> Get PcapPacketHeader
+readNextPacketHeader :: Bool -> LazyByteParsing PcapPacketHeader
 readNextPacketHeader True = do
       tsSec <- getWord32le
       tsUsec <- getWord32le
