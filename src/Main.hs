@@ -6,13 +6,12 @@ module Main where
 --    structure into multiple files if necessary
 --    implement in Idris (using Buffer for ByteString)
 
---import Data.Char
---import Data.Either
 import Data.Maybe
 import Data.Word
 import Data.Time.Format
 import Data.Time.Clock.POSIX
 
+-- TODO: seems to consume more or less the whole file into memory
 -- using LAZY otherwise would load the whole file into memory
 -- profiling with stack:
 --    stack build --profile
@@ -30,26 +29,26 @@ newtype Offering = Offering (String, String)
 -- representing 5 best bids/asks as individual fields and not as list
 -- faster access
 data QuotePacket = QuotePacket 
-  { qpPacketTime  :: String 
-  , qpIssueCode   :: String
-  , qpIssueSeqNo  :: String
-  , qpMktStatType :: String
+  { qpPacketTime  :: !String 
+  , qpIssueCode   :: !String
+  , qpIssueSeqNo  :: !String
+  , qpMktStatType :: !String
 
-  , qpTotBidQtVol :: String
-  , qpBestBid_1   :: Offering
-  , qpBestBid_2   :: Offering
-  , qpBestBid_3   :: Offering
-  , qpBestBid_4   :: Offering
-  , qpBestBid_5   :: Offering
+  , qpTotBidQtVol :: !String
+  , qpBestBid_1   :: !Offering
+  , qpBestBid_2   :: !Offering
+  , qpBestBid_3   :: !Offering
+  , qpBestBid_4   :: !Offering
+  , qpBestBid_5   :: !Offering
 
-  , qpTotAskQtVol :: String
-  , qpBestAsk_1   :: Offering
-  , qpBestAsk_2   :: Offering
-  , qpBestAsk_3   :: Offering
-  , qpBestAsk_4   :: Offering
-  , qpBestAsk_5   :: Offering
+  , qpTotAskQtVol :: !String
+  , qpBestAsk_1   :: !Offering
+  , qpBestAsk_2   :: !Offering
+  , qpBestAsk_3   :: !Offering
+  , qpBestAsk_4   :: !Offering
+  , qpBestAsk_5   :: !Offering
 
-  , qpAcceptTime  :: String -- HHMMSSuu
+  , qpAcceptTime  :: !String -- HHMMSSuu
   }
 
 instance Show Offering where
@@ -92,22 +91,22 @@ instance Show QuotePacket where
 
 -- following https://wiki.wireshark.org/Development/LibpcapFileFormat#File_Format
 data PcapGlobalHeader = PcapGlobalHeader
-  { pcapMagicNumber  :: Word32
-  , pcapVersionMajor :: Word16
-  , pcapVersionMinor :: Word16
-  , pcapThisZone     :: Word32
-  , pcapSigFigs      :: Word32
-  , pcapSnapLen      :: Word32
-  , pcapNetwork      :: Word32
+  { pcapMagicNumber  :: !Word32
+  , pcapVersionMajor :: !Word16
+  , pcapVersionMinor :: !Word16
+  , pcapThisZone     :: !Word32
+  , pcapSigFigs      :: !Word32
+  , pcapSnapLen      :: !Word32
+  , pcapNetwork      :: !Word32
 
   , pcapSwapped      :: !Bool
   } deriving Show
 
 data PcapPacketHeader = PcapPacketHeader
-  { pcapTsSec   :: Word32
-  , pcapTsUSec  :: Word32
-  , pcapIncLen  :: Word32
-  , pcapOrigLen :: Word32
+  { pcapTsSec   :: !Word32
+  , pcapTsUSec  :: !Word32
+  , pcapIncLen  :: !Word32
+  , pcapOrigLen :: !Word32
   } deriving Show
 
 
@@ -123,8 +122,11 @@ pcapMagicNumberNanoIdent = 0xa1b23c4d
 pcapMagicNumberNanoSwapped :: Word32 
 pcapMagicNumberNanoSwapped = 0x4d3cb2a1
 
-kosPcapfileName :: String
-kosPcapfileName = "data/mdf-kospi200.20110216-0.pcap/data"
+kosPcapFileName :: String
+kosPcapFileName = "data/mdf-kospi200.20110216-0.pcap/data"
+
+kosPcapSuperSizeFileName :: String
+kosPcapSuperSizeFileName = "data/mdf-kospi200.20110216-0.pcap/dataBig"
 
 -- a Quote packet starts with this marker
 quotePacketMarker :: String
@@ -132,7 +134,7 @@ quotePacketMarker = "B6034"
 
 main :: IO ()
 main = do
-  let fileName = kosPcapfileName -- "src/Main.hs"
+  let fileName = kosPcapSuperSizeFileName -- kosPcapfileName -- "src/Main.hs"
 
   -- TODO: replace with total function: check if file can be opened and not just throw error at run-time
   bs <- BL.readFile fileName
@@ -142,10 +144,10 @@ main = do
     then putStrLn ("Error: '" ++ fileName ++ "' not a PCAP file - exit")
     else do
       let (gh, bs') = fromJust mayGlobalHeader
+      let headerSwapped = pcapSwapped gh
       putStrLn ("Valid pcap file, header: " ++ show gh)
       -- TODO: use getOpts to check for -r 
-      printQuotePacketsArrival (pcapSwapped gh) bs'
-      return ()
+      printQuotePacketsArrival headerSwapped bs'
 
 printQuotePacketsArrival :: Bool -> BL.ByteString -> IO ()
 printQuotePacketsArrival headerSwapped bs = do
@@ -173,12 +175,10 @@ printQuotePacketsAcceptOrder idx bs = do
 -}
 
 nextQuotePacket :: Bool -> BL.ByteString -> Maybe (QuotePacket, BL.ByteString)
-nextQuotePacket headerSwapped bs = do
-    let ret = runGetOrFail searchQuotePacket bs
-    either 
+nextQuotePacket headerSwapped bs = either 
       (\(_, _, errMsg) -> trace errMsg Nothing) 
       (\(bs', _off, qp) -> Just (qp, bs'))
-      ret
+      (runGetOrFail searchQuotePacket bs)
   where
     searchQuotePacket :: Get QuotePacket  
     searchQuotePacket = do
@@ -191,7 +191,7 @@ nextQuotePacket headerSwapped bs = do
       qpHdr <- getLazyByteString 5
       if BL.unpack qpHdr /= quotePacketMarker
         then do
-          let packetLen = pcapIncLen ph --trace (show ph) (pcapIncLen ph)
+          let packetLen = pcapIncLen ph
           -- skip to the end of the packet, need to subtract the already consumed 42 and 5 bytes
           let skipBytes = fromIntegral packetLen - 5 - 42
           skip skipBytes
@@ -222,7 +222,7 @@ parseQuotePacket ts = do
     bestAsk_4 <- parseOffering
     bestAsk_5 <- parseOffering
 
-    -- skipping ahead to quote accept time: 2x 25 bytes (2x(5 + 4*5)):
+    -- skipping ahead to quote accept time: 2x 25 bytes (2x(5 + 4*5)) = 50
     {-  
     No. of best bid valid quote(total)      5
     No. of best bid quote(1st)              4
@@ -247,7 +247,7 @@ parseQuotePacket ts = do
     -- and will start looking for the beginning of the next package
     skip 1
 
-    return QuotePacket {
+    return $! QuotePacket {
       qpPacketTime  = ts
     , qpIssueCode   = BL.unpack issueCode
     , qpIssueSeqNo  = BL.unpack issueSeqNo
@@ -368,32 +368,3 @@ readNextPacketHeader False = do
       , pcapIncLen  = inclLen
       , pcapOrigLen = origLen
       }
-
-{-
-searchStream :: String -> BL.ByteString -> Maybe BL.ByteString
-searchStream tok bs = do
-    (initWin, bs') <- initWindow (length tok) [] bs
-    (_, bs') <- searchStreamAux tok initWin bs'
-    return bs'
-
-  where
-    searchStreamAux :: String -> String -> BL.ByteString -> Maybe (String, BL.ByteString)
-    searchStreamAux tok win bs = 
-      if win == tok
-        then Just (win, bs)
-        else do
-          (win', bs') <- slideWindow win bs
-          searchStreamAux tok win' bs'
-
-    initWindow  :: Int -> String -> BL.ByteString -> Maybe (String, BL.ByteString)
-    initWindow 0 str bs = Just (str, bs)
-    initWindow n str bs = do
-      (c, bs') <- BL.uncons bs
-      initWindow (n - 1) (str ++ [c]) bs'
-
-    slideWindow :: String -> BL.ByteString -> Maybe (String, BL.ByteString)
-    slideWindow [] _ = Nothing
-    slideWindow (_ : cs) bs = do
-      (c, bs') <- BL.uncons bs
-      pure (cs ++ [c], bs')
-      -}
