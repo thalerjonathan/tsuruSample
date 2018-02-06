@@ -11,7 +11,7 @@ import Data.Word
 import Data.Time.Format
 import Data.Time.Clock.POSIX
 
-import Control.Monad.State
+import Text.Printf
 
 -- TODO: seems to consume more or less the whole file into memory
 -- using LAZY otherwise would load the whole file into memory
@@ -21,6 +21,7 @@ import Control.Monad.State
 --    hp2ps -e8in -c parse-quote.hp
 -- NOTE: we used the Data.Binary.Get package but it seemed that data was not read lazily
 import qualified Data.ByteString.Lazy.Char8 as BL
+import Data.Binary.Get
 
 import Debug.Trace
 
@@ -134,11 +135,9 @@ kosPcapSuperSizeFileName = "data/mdf-kospi200.20110216-0.pcap/dataBig"
 quotePacketMarker :: String
 quotePacketMarker = "B6034"
 
--- TODO: when re-ordering, then can expect packages to arrive out-of-order up to 3 seconds
-
 main :: IO ()
 main = do
-  let fileName = kosPcapSuperSizeFileName -- kosPcapfileName -- "src/Main.hs"
+  let fileName = kosPcapFileName -- kosPcapSuperSizeFileName -- kosPcapFileName -- "src/Main.hs"
 
   -- TODO: replace with total function: check if file can be opened and not just throw error at run-time
   bs <- BL.readFile fileName
@@ -153,6 +152,11 @@ main = do
       -- TODO: use getOpts to check for -r 
       printQuotePacketsArrival headerSwapped bs'
 
+rushThrough :: BL.ByteString -> Maybe BL.ByteString
+rushThrough bs = do
+  (bs', c) <- BL.unsnoc bs
+  rushThrough bs'
+
 printQuotePacketsArrival :: Bool -> BL.ByteString -> IO ()
 printQuotePacketsArrival headerSwapped bs = do
   let mayPh = nextQuotePacket headerSwapped bs
@@ -163,21 +167,64 @@ printQuotePacketsArrival headerSwapped bs = do
       printQuotePacketsArrival headerSwapped bs'
     else putStrLn "Failed reading next packet, proably EOS"
 
-type LazyByteParsing a = State BL.ByteString a
- 
-getLazyByteString :: Int64 -> LazyByteParsing BL.ByteString 
-getLazyByteString n = do
-  bs <- get
-  let bs' = BL.take n bs
-  return bs'
+-- TODO: when re-ordering, then can expect packages to arrive out-of-order up to 3 seconds
+printQuotePacketsInOrder :: Bool -> BL.ByteString -> IO ()
+printQuotePacketsInOrder headerSwapped bs = do
+  let mayPh = nextQuotePacket headerSwapped bs
+  if isJust mayPh
+    then do
+      let (qp, bs') = fromJust mayPh
+      print qp
+      printQuotePacketsInOrder headerSwapped bs'
+    else putStrLn "Failed reading next packet, proably EOS"
 
 nextQuotePacket :: Bool -> BL.ByteString -> Maybe (QuotePacket, BL.ByteString)
 nextQuotePacket headerSwapped bs = either 
-      (\(_, _, errMsg) -> trace errMsg Nothing) 
-      (\(bs', _off, qp) -> Just (qp, bs'))
-      (runGetOrFail searchQuotePacket bs)
+    -- TODO: remove trace
+    (\(_, _, errMsg) -> trace errMsg Nothing) 
+    (\(bs', _off, mayqp) -> 
+      if isJust mayqp
+        then Just (fromJust mayqp, bs')
+        else nextQuotePacket headerSwapped bs')
+    (runGetOrFail searchQuotePacket bs)
   where
-    searchQuotePacket :: LazyByteParsing QuotePacket 
+    searchQuotePacket :: Get (Maybe QuotePacket)
+    searchQuotePacket = do
+      ph <- readNextPacketHeader headerSwapped
+
+      -- skipping 42 bytes of various frames/ethernII/IPv4/UDP
+      skip 42 
+
+      -- packet-data starts, check if it starts with B6034, then its a quote-packet
+      qpHdr <- getLazyByteString 5
+      if BL.unpack qpHdr /= quotePacketMarker
+        then do
+          let packetLen = pcapIncLen ph
+          -- skip to the end of the packet, need to subtract the already consumed 42 and 5 bytes
+          let skipBytes = fromIntegral packetLen - 5 - 42
+          skip skipBytes
+          return Nothing
+        else do
+          let secs       = pcapTsSec ph
+          -- usecs are stored in values up to 100,000, we just need the first 2 digits => divide by 10,000
+              usecs      = (fromIntegral $ pcapTsUSec ph) :: Double
+              usecsFract = (truncate $ usecs / 10000) :: Int
+
+          let utcTime = posixSecondsToUTCTime (fromIntegral secs)
+              ts      = formatTime defaultTimeLocale "%H%M%S" utcTime -- format to same as quote accept time: HHMMSSuu
+              ts'     = ts ++ printf "%02d" usecsFract
+
+          qp <- parseQuotePacket ts'
+          return $ Just qp
+
+{-
+nextQuotePacket :: Bool -> BL.ByteString -> Maybe (QuotePacket, BL.ByteString)
+nextQuotePacket headerSwapped bs = either 
+    (\(_, _, errMsg) -> trace errMsg Nothing) 
+    (\(bs', off, qp) -> trace ("offset = " ++ show off) (Just (qp, bs')))
+    (runGetOrFail searchQuotePacket bs)
+  where
+    searchQuotePacket :: Get QuotePacket 
     searchQuotePacket = do
       ph <- readNextPacketHeader headerSwapped
 
@@ -198,8 +245,9 @@ nextQuotePacket headerSwapped bs = either
           let utcTime = posixSecondsToUTCTime (fromIntegral secs)
           let ts = formatTime defaultTimeLocale "%T" utcTime -- format to same as quote accept time: HHMMSSuu
           parseQuotePacket ts
+  -}
 
-parseQuotePacket :: String -> LazyByteParsing QuotePacket
+parseQuotePacket :: String -> Get QuotePacket
 parseQuotePacket ts = do
     issueCode <- getLazyByteString 12
     issueSeqNo <- getLazyByteString 3
@@ -240,8 +288,6 @@ parseQuotePacket ts = do
 
     -- skipping end of message: 1 byte
     -- endOfMessage <- getWord8
-    -- does not make a difference because we are not reading after this 
-    -- and will start looking for the beginning of the next package
     skip 1
 
     return $! QuotePacket {
@@ -267,7 +313,7 @@ parseQuotePacket ts = do
     , qpAcceptTime  = BL.unpack acceptTime
     }
   where
-    parseOffering :: LazyByteParsing Offering
+    parseOffering :: Get Offering
     parseOffering = do
       price <- getLazyByteString 5
       quantity <- getLazyByteString 7
@@ -275,8 +321,8 @@ parseQuotePacket ts = do
 
 readPcapGlobalHeader :: BL.ByteString -> Maybe (PcapGlobalHeader, BL.ByteString)
 readPcapGlobalHeader bs = do
-  let ret = runGetOrFail readPcapGlobalHeaderAux bs
-  either 
+    let ret = runGetOrFail readPcapGlobalHeaderAux bs
+    either 
       (const Nothing) 
       (\(bs', _off, mayPcapHeader) -> 
         if isJust mayPcapHeader
@@ -284,7 +330,7 @@ readPcapGlobalHeader bs = do
           else Nothing)
       ret
   where
-    readPcapGlobalHeaderAux :: LazyByteParsing (Maybe PcapGlobalHeader)
+    readPcapGlobalHeaderAux :: Get (Maybe PcapGlobalHeader)
     readPcapGlobalHeaderAux = do
       magicNumber <- getWord32be
 
@@ -300,7 +346,7 @@ readPcapGlobalHeader bs = do
             return $ Just gh
           else return Nothing
 
-    readPcapGlobalHeaderIdent :: LazyByteParsing PcapGlobalHeader
+    readPcapGlobalHeaderIdent :: Get PcapGlobalHeader
     readPcapGlobalHeaderIdent = do
       versionMajor <- getWord16be
       versionMinor <- getWord16be
@@ -320,7 +366,7 @@ readPcapGlobalHeader bs = do
       , pcapSwapped      = False
       }
 
-    readPcapGlobalHeaderSwapped :: LazyByteParsing PcapGlobalHeader
+    readPcapGlobalHeaderSwapped :: Get PcapGlobalHeader
     readPcapGlobalHeaderSwapped = do
       versionMajor <- getWord16le
       versionMinor <- getWord16le
@@ -340,28 +386,28 @@ readPcapGlobalHeader bs = do
       , pcapSwapped      = True
       }
 
-readNextPacketHeader :: Bool -> LazyByteParsing PcapPacketHeader
+readNextPacketHeader :: Bool -> Get PcapPacketHeader
 readNextPacketHeader True = do
-      tsSec <- getWord32le
-      tsUsec <- getWord32le
-      inclLen <- getWord32le
-      origLen <- getWord32le
+  tsSec <- getWord32le
+  tsUsec <- getWord32le
+  inclLen <- getWord32le
+  origLen <- getWord32le
 
-      return PcapPacketHeader {
-        pcapTsSec   = tsSec
-      , pcapTsUSec  = tsUsec
-      , pcapIncLen  = inclLen
-      , pcapOrigLen = origLen
-      }
+  return PcapPacketHeader {
+    pcapTsSec   = tsSec
+  , pcapTsUSec  = tsUsec
+  , pcapIncLen  = inclLen
+  , pcapOrigLen = origLen
+  }
 readNextPacketHeader False = do
-      tsSec <- getWord32be
-      tsUsec <- getWord32be
-      inclLen <- getWord32be
-      origLen <- getWord32be
+  tsSec <- getWord32be
+  tsUsec <- getWord32be
+  inclLen <- getWord32be
+  origLen <- getWord32be
 
-      return PcapPacketHeader {
-        pcapTsSec   = tsSec
-      , pcapTsUSec  = tsUsec
-      , pcapIncLen  = inclLen
-      , pcapOrigLen = origLen
-      }
+  return PcapPacketHeader {
+    pcapTsSec   = tsSec
+  , pcapTsUSec  = tsUsec
+  , pcapIncLen  = inclLen
+  , pcapOrigLen = origLen
+  }
