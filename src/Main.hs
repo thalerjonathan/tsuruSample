@@ -1,6 +1,8 @@
 module Main where
 
 -- TODOS
+--    replace all String by Text and use OverloadedStrings to convert between Bytestring and Text
+--    use multiwayifs, check opinionated haskell blog for other useful extensions
 --    ordering of imports 
 --    Hadoc comments for every function
 --    structure into multiple files if necessary
